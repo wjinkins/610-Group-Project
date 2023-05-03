@@ -2,21 +2,32 @@
 %let pints_per_batch = 4350;
 %let fixed_cost = 7500;
 %let price_per_keg = 435;
+%let employee_cost = 15;
+%let overtime_labor = 27;
+%let time_per_keg = 3;
+%let time_per_stop = 5;
+
 proc optmodel;
    /* declare sets and parameters */
    set <str> PRODUCTS, RESOURCES, CUSTOMERS;
    set <num> MONTHS = 1..6;
    set <str> DISTANTCUST = CUSTOMERS diff /OSPB/;
    set <num> FORTNIGHT = 1..2; 
+   set <num> ROUTES = 1..4;
+   
    
    num cost {RESOURCES}, availability {RESOURCES};
    num selling_price {PRODUCTS};
    num break_even_price {PRODUCTS};
    num required {PRODUCTS, RESOURCES} init 0; 
-   num kegs {CUSTOMERS, PRODUCTS, MONTHS};
+   num kegs {CUSTOMERS, PRODUCTS, MONTHS} init 0;
    num route {CUSTOMERS};
    num init_inventory {PRODUCTS};
+   num stops {Routes} = [6 5 3 2];
+   num transit_time {Routes} = [85 49 72 54];
    
+   print stops;
+   print transit_time;
    
    /* read data from SAS data sets */
    read data proj.beer_ingredients into RESOURCES=[Raw_Material] 
@@ -45,7 +56,7 @@ proc optmodel;
    
    /* declare variables */
    var NumInv {PRODUCTS, MONTHS} >= 0;
-   
+   var NumProd {PRODUCTS} >= 0;
      
   /* declare decision variables*/
    var production {PRODUCTS, MONTHS, FORTNIGHT} >=0 integer;
@@ -53,6 +64,8 @@ proc optmodel;
    var pub_deliveries {PRODUCTS, MONTHS, FORTNIGHT} >=0 integer;
    
    var volume_deliveries {PRODUCTS, MONTHS, DISTANTCUST} >=0 integer; 
+   
+   var overtime >=0; 
   
    impvar BegInv {p in PRODUCTS, m in MONTHS} = if m = 1 then 
     init_inventory [p] - 
@@ -74,6 +87,40 @@ proc optmodel;
    else
       production [p,m-1,2] * 30 + NumINV[p,m-1] + (production [p,m,1] * 30)- 
       SUM{d in DISTANTCUST} volume_deliveries [p,m,d] - pub_deliveries [p,m,1];
+    
+     /*Calculate Costs*/
+     /*Amount of Resources Used Cost*/
+     impvar AmountUsed {r in RESOURCES} = 
+     sum {p in PRODUCTS, m in MONTHS, f in FORTNIGHT} production[p,m,f] * required[p,r];
+     
+     /*Batch Costs*/
+     impvar BatchCost = 
+     &fixed_cost * sum {p in PRODUCTS, m in MONTHS, f in FORTNIGHT} production[p,m,f];
+     
+     /*Driving Cost*/
+     impvar RentalCost = 300 * 6 * 2;
+     
+     /*Delivery Time*/
+    impvar Delivery {m in MONTHS, f in FORTNIGHT} = 120 + if  f = 1 then
+    (stops[1] + stops[2]) * &time_per_stop + transit_time[1] + transit_time[2] +
+    (SUM{d in DISTANTCUST, p in PRODUCTS: route[d] in 1..2} volume_deliveries [p,m,d]) * &time_per_keg
+    else
+    (stops[3] + stops[4]) * &time_per_stop + transit_time[3] + transit_time[4] +
+    (SUM{d in DISTANTCUST, p in PRODUCTS: route[d] in 3..4} volume_deliveries [p,m,d]) * &time_per_keg;   
+
+     impvar ProdCost = BatchCost +
+     sum {r in RESOURCES} cost[r] * AmountUsed[r] + overtime * (&overtime_labor - cost["Brewing_Labor"]);
+     
+     impvar Revenue = SUM {p in PRODUCTS, m in MONTHS, f in FORTNIGHT} pub_deliveries[p,m,f] * &price_per_keg 
+      + SUM{p in PRODUCTS, m in MONTHS, d in DISTANTCUST} volume_deliveries[p,m,d] * selling_price[p];
+      
+      impvar Future_Revenue = SUM{p in PRODUCTS} (numInv[p,6] + production[p,6,2] * 30) * break_even_price[p]; 
+  
+   /*Driver Labor*/
+   impvar Driver_Labor = sum{m in MONTHS, f in FORTNIGHT} (Delivery[m,f]/60) * &employee_cost;
+  
+      /*Total Cost*/
+      impvar Total_Cost = ProdCost + Driver_Labor + RentalCost + BatchCost;
   
    /* declare contraints */     
    con Beginning_balance {p in PRODUCTS}:
@@ -86,12 +133,27 @@ proc optmodel;
    
    con prod_con {m in MONTHS, f in FORTNIGHT}: SUM {p in PRODUCTS} production [p,m,f] <= 5;
    
+   con Demand_con {p in PRODUCTS, m in MONTHS, d in DISTANTCUST}: 
+   volume_deliveries[p,m,d] <= kegs[d,p,m];
+   
+   /*For Overtime*/
+   con Usage {r in RESOURCES}: 
+     AmountUsed[r] <= availability[r]
+        + if (r='Brewing_Labor') then overtime else 0;
+        
       /* declare objective */
-   max Revenue = SUM {p in PRODUCTS, m in MONTHS, f in FORTNIGHT} pub_deliveries[p,m,f] * &price_per_keg 
-      + SUM{p in PRODUCTS, m in MONTHS, d in DISTANTCUST} volume_deliveries[p,m,d] * selling_price[p];
+     max TotalProfit = Revenue + Future_Revenue - Total_Cost;
    
    solve;
+      
+      print Delivery;
+      
+   create data proj.production from [Product Month Fortnight] Batches=production;
+   create data proj.pub_deliveries from [Product Month Fortnight] Kegs=pub_deliveries;
+   create data proj.volume_deliveries from [Customer Product Month] Kegs=volume_deliveries; 
+   
    
    print NumINV;
+   
    
    quit;
