@@ -130,6 +130,9 @@ proc optmodel;
    con Inventory_balance {p in PRODUCTS, m in MONTHS diff /1/}:
       (production [p,m-1,2] + production [p,m,1]) * 30 + NumINV[p,m-1] = 
       NumINV[p,m] + SUM{d in DISTANTCUST} volume_deliveries [p,m,d] + pub_deliveries [p,m,1] + pub_deliveries [p,m,2];
+      
+   con Demand_con4 {p in PRODUCTS, m in MONTHS}: 
+   sum{f in Fortnight} pub_deliveries[p,m,f] <= kegs['OSPB',p,m];
    
    con prod_con {m in MONTHS, f in FORTNIGHT}: SUM {p in PRODUCTS} production [p,m,f] <= 5;
    
@@ -169,17 +172,40 @@ proc optmodel;
    con OvertimeLimit: overtime <= 210;
         
         /*add constraint for no more than 210 OT hours*/
+       
+    /*Half pub demand, final invetory */   
+   
+   con final_inv{p in PRODUCTS}: numInv[p,6] + production[p,6,2]*30 >= kegs['OSPB',p,6] * 0.5+
+   0.95*(SUM{d in DISTANTCUST: route[d] in 1..2} kegs [d,p,6]);     
+   
+   /* Use this section to iterate on the sensitivity
+   Save the solution information each time*/
+   fix production["Dark_Ale",1,1] = 1;
+   
+   /*add this statement when running the final version*/
+   /*unfix production;*/
+   
+   expand final_inv;
         
       /* declare objective */
    max TotalProfit = Revenue + Future_Revenue - Total_Cost;
    
-   solve with milp / relobjgap = 0.05;
+   /*The best value used was relobjgap of 0.0078, this took about 90 sec for a run*/
+   solve with milp / relobjgap = 0.01;
    
    for {p in PRODUCTS, m in MONTHS, f in FORTNIGHT}
    production [p,m,f] = round(production [p,m,f]);
+   
+   for {p in PRODUCTS, m in MONTHS, f in FORTNIGHT}
+   pub_deliveries [p,m,f] = round(pub_deliveries [p,m,f]);
+   
+   for {p in PRODUCTS, m in MONTHS, d in DISTANTCUST}
+   volume_deliveries [p,m,d] = round(volume_deliveries [p,m,d]);
       
    print Delivery;
-   print production;
+   print {p in PRODUCTS} production[p,1,1];
+   
+   print pub_deliveries {p in PRODUCTS,m in  MONTHS,f in FORTNIGHT} (kegs ["OSPB", p,m]/2);
   
       
    create data proj.production from [Product Month Fortnight] Batches=production;
@@ -187,11 +213,14 @@ proc optmodel;
    create data proj.volume_deliveries from [Product Month Customer] Kegs=volume_deliveries; 
    
    
+   
    print NumINV;
    print BegInv;
    print MidInv;
    print PostInv;
    print overtime;
+   
+
    
    
    quit;
